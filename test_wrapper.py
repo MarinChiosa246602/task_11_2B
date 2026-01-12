@@ -1,3 +1,10 @@
+"""
+RL Model Accuracy Test
+======================
+Evaluate the trained RL model's positioning accuracy.
+Measures the final distance error across multiple episodes.
+"""
+
 import numpy as np
 import argparse
 from stable_baselines3 import PPO, SAC, TD3
@@ -101,7 +108,7 @@ def evaluate_model(model_path, algorithm='PPO', n_episodes=100, render=False):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate RL model positioning accuracy')
-    parser.add_argument('--model_path', type=str, default='trained_model',
+    parser.add_argument('--model_path', type=str, default='model/best_model',
                         help='Path to trained model (without .zip)')
     parser.add_argument('--algorithm', type=str, default='PPO',
                         choices=['PPO', 'SAC', 'TD3'])
