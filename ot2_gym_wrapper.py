@@ -133,4 +133,7 @@ class OT2Env(gym.Env):
         pass
     
     def close(self):
-        self.sim.close()
+        try:
+            self.sim.close()
+        except:
+            pass  # Already closed
