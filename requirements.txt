@@ -1,5 +1,12 @@
-numpy<2
-stable-baselines3
-gymnasium
-pybullet
-clearml
+# Python 3.10.19 | packaged by conda-forge | (main, Oct 22 2025, 22:23:22) [MSC v.1944 64 bit (AMD64)]
+
+clearml == 2.1.1
+drone_2d_custom_gym_env == 1.3.3
+gymnasium == 1.2.3
+matplotlib == 3.10.7
+numpy == 2.2.6
+pillow == 12.0.0
+pybullet == 3.2.7
+stable_baselines3 == 2.7.1
+tensorboard == 2.20.0
+wandb == 0.23.0
