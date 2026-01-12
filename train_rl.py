@@ -51,7 +51,7 @@ def parse_args():
                         choices=['PPO', 'SAC', 'TD3'])
     
     # Training hyperparameters
-    parser.add_argument('--total_timesteps', type=int, default=500000)
+    parser.add_argument('--total_timesteps', type=int, default=1000)
     parser.add_argument('--learning_rate', type=float, default=0.0003)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--n_steps', type=int, default=2048)
