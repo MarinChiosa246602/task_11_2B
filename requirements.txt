@@ -1,0 +1,5 @@
+numpy<2
+stable-baselines3
+gymnasium
+pybullet
+clearml
