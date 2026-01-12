@@ -1,12 +1,3 @@
-"""
-OT-2 Gymnasium Environment Wrapper
-==================================
-A Gymnasium-compatible wrapper for the Opentrons OT-2 simulation.
-Follows the provided template structure.
-
-Author: Task 11 - RL Controller
-"""
-
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -25,10 +16,11 @@ class OT2Env(gym.Env):
         - Velocity commands (vx, vy, vz) in range [-1, 1]
     """
     
-    def __init__(self, render=False, max_steps=1000):
+    def __init__(self, render=False, max_steps=300, target_threshold=0.001):
         super(OT2Env, self).__init__()
         self.render_mode = render
         self.max_steps = max_steps
+        self.target_threshold = target_threshold  # 0.001m = 1mm
 
         # Create the simulation environment
         self.sim = Simulation(num_agents=1, render=render)
@@ -52,80 +44,96 @@ class OT2Env(gym.Env):
         
         # Goal position (set in reset)
         self.goal_position = None
+        
+        # Previous distance (for reward shaping)
+        self.previous_distance = None
 
     def reset(self, seed=None, options=None):
-        # Being able to set a seed is required for reproducibility
         if seed is not None:
             np.random.seed(seed)
 
-        # Reset the state of the environment to an initial state
         # Set a random goal position within the working area
         # Workspace limits: X [0.0, 0.15], Y [-0.05, 0.15], Z [0.17, 0.25]
         self.goal_position = np.array([
             np.random.uniform(0.0, 0.15),    # X
             np.random.uniform(-0.05, 0.15),  # Y
-            np.random.uniform(0.17, 0.25)    # Z (must be >= 0.17 to be reachable)
+            np.random.uniform(0.17, 0.25)    # Z
         ], dtype=np.float32)
         
-        # Call the environment reset function
+        # Reset simulation
         state = self.sim.reset(num_agents=1)
         
-        # Process the observation: extract pipette position, append goal position
+        # Extract pipette position
         robot_key = list(state.keys())[0]
         pipette_pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
         observation = np.concatenate([pipette_pos, self.goal_position]).astype(np.float32)
 
-        # Reset the number of steps
+        # Reset counters
         self.steps = 0
+        self.previous_distance = np.linalg.norm(pipette_pos - self.goal_position)
         
-        # Return observation and info dict (Gymnasium API)
         info = {}
-
         return observation, info
 
     def step(self, action):
-        # Execute one time step within the environment
-        # Since we are only controlling the pipette position, we accept 3 values 
-        # for the action and need to append 0 for the drop action
+        # Append 0 for drop action
         action = np.append(action, 0)
 
-        # Call the environment step function
-        # We pass action as a list because sim.run expects a list of actions (one per agent)
+        # Execute action
         state = self.sim.run([action])
 
-        # Process the observation: extract pipette position, append goal position
+        # Extract pipette position
         robot_key = list(state.keys())[0]
         pipette_pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
         observation = np.concatenate([pipette_pos, self.goal_position]).astype(np.float32)
 
-        # Calculate the distance to goal
+        # Calculate distance to goal
         distance = np.linalg.norm(pipette_pos - self.goal_position)
         
-        # Calculate the reward
-        # Negative distance encourages getting closer to the goal
-        reward = -distance
+        # =====================================================================
+        # REWARD FUNCTION
+        # =====================================================================
+        
+        # 1. Base reward: negative distance (scaled)
+        reward = -distance * 10
+        
+        # 2. Progress reward: bonus for getting closer
+        distance_improvement = self.previous_distance - distance
+        reward += distance_improvement * 100
+        
+        # 3. Threshold bonuses
+        if distance < 0.01:    # < 10mm
+            reward += 1.0
+        if distance < 0.005:   # < 5mm
+            reward += 2.0
+        if distance < self.target_threshold:  # < 1mm (target)
+            reward += 5.0
+        
+        # 4. Small time penalty
+        reward -= 0.01
+        
+        # Update previous distance
+        self.previous_distance = distance
 
-        # Check if the task has been completed (terminated)
-        # Threshold of 0.001m (1mm) - reasonable for pipette tip precision
-        if distance < 0.001:
+        # Check termination (goal reached)
+        if distance < self.target_threshold:
             terminated = True
-            reward += 100  # Positive reward for completing the task
+            reward += 100  # Big bonus for success!
         else:
             terminated = False
         
-        # Convert reward to Python float (required by SB3)
+        # Convert to Python float
         reward = float(reward)
 
-        # Check if the episode should be truncated (max steps reached)
-        if self.steps >= self.max_steps:
-            truncated = True
-        else:
-            truncated = False
-
-        info = {}  # We don't need to return any additional information
-
-        # Increment the number of steps
+        # Check truncation (max steps)
         self.steps += 1
+        truncated = self.steps >= self.max_steps
+
+        info = {
+            'distance': distance,
+            'distance_mm': distance * 1000,
+            'success': distance < self.target_threshold
+        }
 
         return observation, reward, terminated, truncated, info
 
@@ -136,4 +144,4 @@ class OT2Env(gym.Env):
         try:
             self.sim.close()
         except:
-            pass  # Already closed
+            pass
