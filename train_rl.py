@@ -6,6 +6,9 @@ Train an RL agent to control the OT-2 pipette positioning.
 Usage:
     python train_rl.py --learning_rate 0.0003 --batch_size 64 --n_steps 2048 --n_epochs 10
 """
+import subprocess
+import sys
+subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy==1.26.4", "--force-reinstall", "-q"])
 
 import argparse
 import numpy as np
