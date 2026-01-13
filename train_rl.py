@@ -116,7 +116,7 @@ class ClearMLCallback(BaseCallback):
 
 def train():
     # Hyperparameters
-    total_timesteps = 500000    # 500K should be enough with fixed observations
+    total_timesteps = 1000000   # 1M timesteps for better convergence
     learning_rate = 0.0003
     batch_size = 128
     n_steps = 2048
@@ -128,7 +128,7 @@ def train():
     max_steps = 100             # Short episodes
     
     print("="*60)
-    print("OT-2 RL Training - VERSION 3 ")
+    print("OT-2 RL Training - FIXED VERSION")
     print("="*60)
     print(f"Total Timesteps:   {total_timesteps:,}")
     print(f"Learning Rate:     {learning_rate}")
