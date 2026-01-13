@@ -116,7 +116,7 @@ class ClearMLCallback(BaseCallback):
 
 def train():
     # Hyperparameters
-    total_timesteps = 1000000   # 1M timesteps for better convergence
+    total_timesteps = 3000000   
     learning_rate = 0.0003
     batch_size = 128
     n_steps = 2048
