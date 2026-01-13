@@ -1,8 +1,7 @@
 """
-RL Model Test Script (test_wrapper.py)
-======================================
+RL Model Test Script
+====================
 Test the trained model and measure positioning accuracy.
-Works with the fixed 10-dimensional observation space.
 """
 
 import numpy as np
@@ -37,8 +36,14 @@ def evaluate_model(model_path, n_episodes=100, render=False):
             done = terminated or truncated
             steps += 1
         
-        # Get final distance from info
-        final_distance = info['distance']
+        # Get final distance from info or calculate
+        if 'distance' in info:
+            final_distance = info['distance']
+        else:
+            # Observation format: [delta(3), dist_norm(1), pipette(3), goal(3)]
+            pipette_pos = obs[4:7]
+            goal_pos = obs[7:10]
+            final_distance = np.linalg.norm(pipette_pos - goal_pos)
         
         distances.append(final_distance)
         lengths.append(steps)
@@ -47,7 +52,7 @@ def evaluate_model(model_path, n_episodes=100, render=False):
         if (ep + 1) % 10 == 0:
             avg_dist = np.mean(distances[-10:])
             avg_len = np.mean(lengths[-10:])
-            print(f"Episode {ep+1:3d}: Avg Distance (last 10): {avg_dist*1000:.3f} mm")
+            print(f"Episode {ep+1:3d}: Avg Distance: {avg_dist*1000:.2f} mm, Avg Length: {avg_len:.1f}")
     
     env.close()
     
@@ -55,12 +60,12 @@ def evaluate_model(model_path, n_episodes=100, render=False):
     print("\n" + "=" * 60)
     print("EVALUATION RESULTS")
     print("=" * 60)
-    print(f"\nPositioning Error Statistics:")
-    print(f"  Mean Distance:     {np.mean(distances)*1000:.3f} mm ({np.mean(distances):.6f} m)")
-    print(f"  Std Distance:      {np.std(distances)*1000:.3f} mm")
-    print(f"  Min Distance:      {np.min(distances)*1000:.3f} mm")
-    print(f"  Max Distance:      {np.max(distances)*1000:.3f} mm")
-    print(f"\nPerformance Metrics:")
+    print(f"\nPositioning Error:")
+    print(f"  Mean Distance:  {np.mean(distances)*1000:.3f} mm ({np.mean(distances):.6f} m)")
+    print(f"  Std Distance:   {np.std(distances)*1000:.3f} mm")
+    print(f"  Min Distance:   {np.min(distances)*1000:.3f} mm")
+    print(f"  Max Distance:   {np.max(distances)*1000:.3f} mm")
+    print(f"\nPerformance:")
     print(f"  Success Rate (<1mm): {np.mean(successes)*100:.1f}%")
     print(f"  Mean Episode Length: {np.mean(lengths):.1f} steps")
     print("=" * 60)
@@ -73,13 +78,10 @@ def evaluate_model(model_path, n_episodes=100, render=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test trained RL model')
-    parser.add_argument('--model_path', type=str, default='model/best_model',
-                        help='Path to trained model (without .zip)')
-    parser.add_argument('--n_episodes', type=int, default=100,
-                        help='Number of evaluation episodes')
-    parser.add_argument('--render', action='store_true',
-                        help='Render the simulation')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, default='model/best_model')
+    parser.add_argument('--n_episodes', type=int, default=100)
+    parser.add_argument('--render', action='store_true')
     args = parser.parse_args()
     
     evaluate_model(args.model_path, args.n_episodes, args.render)

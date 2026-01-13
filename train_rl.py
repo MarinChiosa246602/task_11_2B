@@ -1,7 +1,7 @@
 """
 RL Training Script for OT-2 with ClearML
 ========================================
-IMPROVED VERSION - Better hyperparameters for faster convergence
+FIXED VERSION - Trains properly with goal-relative observations
 """
 import subprocess
 import sys
@@ -17,7 +17,7 @@ from clearml import Task, Logger
 
 task = Task.init(
     project_name='Mentor Group - Myrthe/Group 2',
-    task_name='PPO_Training_Improved'
+    task_name='PPO_Training_Fixed_v2'
 )
 
 task.set_base_docker('deanis/2023y2b-rl:latest')
@@ -30,6 +30,7 @@ task.execute_remotely(queue_name="default")
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from ot2_gym_wrapper import OT2Env
 
@@ -38,19 +39,20 @@ from ot2_gym_wrapper import OT2Env
 # ClearML Logging Callback
 # =============================================================================
 
-class ClearMLLoggingCallback(BaseCallback):
+class ClearMLCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
         self.episode_rewards = []
         self.episode_lengths = []
         self.episode_count = 0
         self.best_reward = -np.inf
+        self.success_count = 0
         self.logger_clearml = None
         
     def _on_training_start(self):
         self.logger_clearml = Logger.current_logger()
         print("\n" + "="*60)
-        print("Training started")
+        print("Training started - FIXED VERSION")
         print("="*60 + "\n")
         
     def _on_step(self):
@@ -66,20 +68,30 @@ class ClearMLLoggingCallback(BaseCallback):
                         self.episode_lengths.append(ep_length)
                         self.episode_count += 1
                         
+                        # Track successes (episode ended early = reached goal)
+                        if ep_length < 100:
+                            self.success_count += 1
+                        
                         # Log to ClearML
-                        self.logger_clearml.report_scalar("Episode Metrics", "Reward", ep_reward, self.episode_count)
-                        self.logger_clearml.report_scalar("Episode Metrics", "Length", ep_length, self.episode_count)
+                        self.logger_clearml.report_scalar("Episode", "Reward", ep_reward, self.episode_count)
+                        self.logger_clearml.report_scalar("Episode", "Length", ep_length, self.episode_count)
                         
                         if len(self.episode_rewards) >= 100:
                             avg = np.mean(self.episode_rewards[-100:])
-                            self.logger_clearml.report_scalar("Moving Averages", "Reward (100 ep)", avg, self.episode_count)
+                            self.logger_clearml.report_scalar("Average", "Reward (100 ep)", avg, self.episode_count)
+                            
+                            # Success rate
+                            recent_successes = sum(1 for l in self.episode_lengths[-100:] if l < 100)
+                            success_rate = recent_successes / 100 * 100
+                            self.logger_clearml.report_scalar("Average", "Success Rate %", success_rate, self.episode_count)
                         
                         if ep_reward > self.best_reward:
                             self.best_reward = ep_reward
                         
                         if self.episode_count % 100 == 0:
                             avg = np.mean(self.episode_rewards[-100:]) if len(self.episode_rewards) >= 100 else np.mean(self.episode_rewards)
-                            print(f"  Episode {self.episode_count:5d} | Reward: {ep_reward:8.2f} | Avg: {avg:8.2f} | Best: {self.best_reward:8.2f}")
+                            avg_len = np.mean(self.episode_lengths[-100:]) if len(self.episode_lengths) >= 100 else np.mean(self.episode_lengths)
+                            print(f"  Ep {self.episode_count:5d} | Reward: {ep_reward:7.1f} | Avg: {avg:7.1f} | Avg Len: {avg_len:5.1f} | Best: {self.best_reward:7.1f}")
         return True
     
     def _on_training_end(self):
@@ -87,86 +99,110 @@ class ClearMLLoggingCallback(BaseCallback):
         print("TRAINING COMPLETE")
         print("="*60)
         if self.episode_rewards:
-            print(f"Episodes: {self.episode_count}")
+            print(f"Total Episodes: {self.episode_count}")
             print(f"Best Reward: {self.best_reward:.2f}")
             print(f"Final Avg (100): {np.mean(self.episode_rewards[-100:]):.2f}")
+            print(f"Final Avg Length: {np.mean(self.episode_lengths[-100:]):.1f}")
+            
+            # Calculate success rate
+            recent_successes = sum(1 for l in self.episode_lengths[-100:] if l < 100)
+            print(f"Success Rate (last 100): {recent_successes}%")
+        print("="*60)
 
 
 # =============================================================================
-# Arguments - IMPROVED HYPERPARAMETERS
+# Training Function
 # =============================================================================
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--total_timesteps', type=int, default=1000000)  # 1M steps
-    parser.add_argument('--learning_rate', type=float, default=0.0003)   # Higher LR
-    parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--n_steps', type=int, default=2048)
-    parser.add_argument('--n_epochs', type=int, default=10)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--gae_lambda', type=float, default=0.95)
-    parser.add_argument('--clip_range', type=float, default=0.2)
-    parser.add_argument('--ent_coef', type=float, default=0.01)
-    parser.add_argument('--max_steps', type=int, default=100)  # Shorter episodes!
-    return parser.parse_args()
-
-
-# =============================================================================
-# Training
-# =============================================================================
-
-def train(args):
+def train():
+    # Hyperparameters
+    total_timesteps = 500000    # 500K should be enough with fixed observations
+    learning_rate = 0.0003
+    batch_size = 64
+    n_steps = 2048
+    n_epochs = 10
+    gamma = 0.99
+    gae_lambda = 0.95
+    clip_range = 0.2
+    ent_coef = 0.01
+    max_steps = 100             # Short episodes
+    
     print("="*60)
-    print("OT-2 RL Training - IMPROVED")
+    print("OT-2 RL Training - FIXED VERSION")
     print("="*60)
-    print(f"Total Timesteps:   {args.total_timesteps:,}")
-    print(f"Learning Rate:     {args.learning_rate}")
-    print(f"Max Steps/Episode: {args.max_steps}")
+    print(f"Total Timesteps:   {total_timesteps:,}")
+    print(f"Learning Rate:     {learning_rate}")
+    print(f"Max Steps/Episode: {max_steps}")
+    print(f"Observation:       Goal-relative (10 dim)")
     print("-"*60)
     
-    # Log to ClearML
-    task.connect(vars(args))
+    # Log hyperparameters
+    task.connect({
+        'total_timesteps': total_timesteps,
+        'learning_rate': learning_rate,
+        'batch_size': batch_size,
+        'n_steps': n_steps,
+        'n_epochs': n_epochs,
+        'gamma': gamma,
+        'max_steps': max_steps,
+        'observation_type': 'goal_relative_10dim'
+    })
     
-    # Create environments with SHORTER episodes
-    env = OT2Env(render=False, max_steps=args.max_steps)
+    # Create environment
+    env = OT2Env(render=False, max_steps=max_steps)
     env = Monitor(env)
     
-    eval_env = OT2Env(render=False, max_steps=args.max_steps)
+    eval_env = OT2Env(render=False, max_steps=max_steps)
     eval_env = Monitor(eval_env)
     
-    # Create PPO model
+    # Create PPO model with tuned network
+    policy_kwargs = dict(
+        net_arch=dict(pi=[128, 128], vf=[128, 128])  # Separate policy/value networks
+    )
+    
     model = PPO(
         'MlpPolicy',
         env,
-        learning_rate=args.learning_rate,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
-        gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_range=args.clip_range,
-        ent_coef=args.ent_coef,
+        learning_rate=learning_rate,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        clip_range=clip_range,
+        ent_coef=ent_coef,
+        policy_kwargs=policy_kwargs,
         verbose=1
     )
     
     # Callbacks
     callbacks = [
-        ClearMLLoggingCallback(),
-        EvalCallback(eval_env, best_model_save_path='./models/', eval_freq=10000, verbose=1)
+        ClearMLCallback(),
+        EvalCallback(
+            eval_env, 
+            best_model_save_path='./models/', 
+            eval_freq=10000,
+            n_eval_episodes=20,
+            verbose=1
+        )
     ]
     
     # Train
     print("\nStarting training...")
-    model.learn(total_timesteps=args.total_timesteps, callback=callbacks, progress_bar=True)
+    model.learn(total_timesteps=total_timesteps, callback=callbacks, progress_bar=True)
     
-    # Save
+    # Save final model
     model.save("trained_model")
     task.upload_artifact("model", artifact_object="trained_model.zip")
+    print("Final model saved and uploaded")
     
+    # Save best model
     import os
     if os.path.exists("./models/best_model.zip"):
         task.upload_artifact("best_model", artifact_object="./models/best_model.zip")
+        print("Best model uploaded")
     
+    # Cleanup
     try:
         env.close()
         eval_env.close()
@@ -176,6 +212,9 @@ def train(args):
     print("\nTraining complete!")
 
 
+# =============================================================================
+# Main
+# =============================================================================
+
 if __name__ == "__main__":
-    args = parse_args()
-    train(args)
+    train()
