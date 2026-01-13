@@ -128,7 +128,7 @@ def train():
     max_steps = 100             # Short episodes
     
     print("="*60)
-    print("OT-2 RL Training - FIXED VERSION")
+    print("OT-2 RL Training - VERSION 3")
     print("="*60)
     print(f"Total Timesteps:   {total_timesteps:,}")
     print(f"Learning Rate:     {learning_rate}")
