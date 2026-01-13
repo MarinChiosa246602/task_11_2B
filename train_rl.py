@@ -118,7 +118,7 @@ def train():
     # Hyperparameters
     total_timesteps = 500000    # 500K should be enough with fixed observations
     learning_rate = 0.0003
-    batch_size = 64
+    batch_size = 128
     n_steps = 2048
     n_epochs = 10
     gamma = 0.99
