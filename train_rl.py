@@ -1,192 +1,212 @@
 """
-RL Training Script for OT-2 with ClearML
-========================================
-4D Normalized Direction Observation
-Optimal policy: action = observation[:3]
+RL Training Script for OT-2 Pipette Positioning
+================================================
+
+Trains a PPO agent using Stable Baselines 3 to control the OT-2
+pipette. Supports Weights & Biases logging.
+
+Usage:
+    # Basic training
+    python train_rl.py
+
+    # With WandB logging
+    python train_rl.py --wandb
+
+    # Custom hyperparameters
+    python train_rl.py --lr 0.0003 --batch_size 64 --n_steps 2048 --total_timesteps 500000
+
+Author : Marin Chiosa
+Course : BUas Applied AI & Data Science – Robotics (OT-2 Simulation)
 """
-import subprocess
-import sys
-subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy==1.26.4", "--force-reinstall", "-q"])
 
+import argparse
+import os
 import numpy as np
-from clearml import Task, Logger
+import time
 
-# =============================================================================
-# ClearML Setup
-# =============================================================================
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-task = Task.init(
-    project_name='Mentor Group - Myrthe/Group 2',
-    task_name='PPO_NormalizedDir_4D'
+from stable_baselines3 import PPO, SAC, TD3
+from stable_baselines3.common.callbacks import (
+    BaseCallback, EvalCallback, CheckpointCallback
 )
-
-task.set_base_docker('deanis/2023y2b-rl:latest')
-task.execute_remotely(queue_name="default")
-
-# =============================================================================
-# Imports
-# =============================================================================
-
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
+from ot2_gym_wrapper import OT2GymWrapper
 
-from ot2_gym_wrapper import OT2Env
 
+class MetricsCallback(BaseCallback):
+    """Logs training metrics, optionally to WandB."""
 
-# =============================================================================
-# Callback
-# =============================================================================
+    def __init__(self, eval_env, eval_freq=5000, use_wandb=False, verbose=1):
+        super().__init__(verbose)
+        self.eval_env = eval_env
+        self.eval_freq = eval_freq
+        self.use_wandb = use_wandb
+        self.best_error = float('inf')
 
-class ClearMLCallback(BaseCallback):
-    def __init__(self):
-        super().__init__()
-        self.episode_rewards = []
-        self.episode_lengths = []
-        self.episode_count = 0
-        self.best_reward = -np.inf
-        self.logger_clearml = None
-        
-    def _on_training_start(self):
-        self.logger_clearml = Logger.current_logger()
-        print("\n" + "="*60)
-        print("Training - 4D NORMALIZED DIRECTION")
-        print("Optimal policy: action = observation[:3]")
-        print("="*60 + "\n")
-        
     def _on_step(self):
-        if self.locals.get('dones') is not None:
-            for idx, done in enumerate(self.locals['dones']):
-                if done and 'infos' in self.locals:
-                    info = self.locals['infos'][idx]
-                    if 'episode' in info:
-                        ep_reward = info['episode']['r']
-                        ep_length = info['episode']['l']
-                        
-                        self.episode_rewards.append(ep_reward)
-                        self.episode_lengths.append(ep_length)
-                        self.episode_count += 1
-                        
-                        self.logger_clearml.report_scalar("Episode", "Reward", ep_reward, self.episode_count)
-                        self.logger_clearml.report_scalar("Episode", "Length", ep_length, self.episode_count)
-                        
-                        if len(self.episode_rewards) >= 100:
-                            avg = np.mean(self.episode_rewards[-100:])
-                            avg_len = np.mean(self.episode_lengths[-100:])
-                            self.logger_clearml.report_scalar("Average", "Reward", avg, self.episode_count)
-                            self.logger_clearml.report_scalar("Average", "Length", avg_len, self.episode_count)
-                            
-                            successes = sum(1 for l in self.episode_lengths[-100:] if l < 100)
-                            self.logger_clearml.report_scalar("Average", "Success%", successes, self.episode_count)
-                        
-                        if ep_reward > self.best_reward:
-                            self.best_reward = ep_reward
-                        
-                        if self.episode_count % 100 == 0:
-                            avg = np.mean(self.episode_rewards[-100:]) if len(self.episode_rewards) >= 100 else np.mean(self.episode_rewards)
-                            avg_len = np.mean(self.episode_lengths[-100:]) if len(self.episode_lengths) >= 100 else np.mean(self.episode_lengths)
-                            print(f"  Ep {self.episode_count:5d} | Rew: {avg:7.1f} | Len: {avg_len:5.1f} | Best: {self.best_reward:7.1f}")
+        if self.n_calls % self.eval_freq == 0:
+            errors = []
+            for _ in range(5):
+                obs, info = self.eval_env.reset()
+                episode_error = info['error']
+                for _ in range(500):
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    obs, reward, terminated, truncated, info = self.eval_env.step(action)
+                    episode_error = info['error']
+                    if terminated or truncated:
+                        break
+                errors.append(episode_error)
+
+            mean_error = np.mean(errors)
+            min_error = np.min(errors)
+
+            if self.verbose:
+                print(f"  [eval @ {self.n_calls}] "
+                      f"mean_err={mean_error*1000:.2f}mm  "
+                      f"min_err={min_error*1000:.2f}mm  "
+                      f"best={self.best_error*1000:.2f}mm")
+
+            if mean_error < self.best_error:
+                self.best_error = mean_error
+                self.model.save("models/best_model")
+                if self.verbose:
+                    print(f"    New best! Saved to models/best_model")
+
+            if self.use_wandb:
+                import wandb
+                wandb.log({
+                    "eval/mean_error_mm": mean_error * 1000,
+                    "eval/min_error_mm": min_error * 1000,
+                    "eval/best_error_mm": self.best_error * 1000,
+                    "train/timesteps": self.n_calls,
+                })
+
         return True
-    
-    def _on_training_end(self):
-        print("\n" + "="*60)
-        print("TRAINING COMPLETE")
-        print("="*60)
-        if self.episode_rewards:
-            print(f"Episodes: {self.episode_count}")
-            print(f"Best Reward: {self.best_reward:.1f}")
-            avg_len = np.mean(self.episode_lengths[-100:])
-            print(f"Final Avg Length: {avg_len:.1f}")
-            successes = sum(1 for l in self.episode_lengths[-100:] if l < 100)
-            print(f"Final Success Rate: {successes}%")
-        print("="*60)
 
 
-# =============================================================================
-# Training
-# =============================================================================
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train RL agent for OT-2")
+    parser.add_argument("--algo", type=str, default="PPO", choices=["PPO", "SAC", "TD3"])
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--n_steps", type=int, default=2048, help="PPO rollout length")
+    parser.add_argument("--total_timesteps", type=int, default=500_000)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--max_steps", type=int, default=1000, help="Max steps per episode")
+    parser.add_argument("--substeps", type=int, default=10)
+    parser.add_argument("--eval_freq", type=int, default=10000)
+    parser.add_argument("--wandb", action="store_true", help="Enable WandB logging")
+    parser.add_argument("--wandb_project", type=str, default="ot2-rl-controller")
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
 
-def train():
-    # Hyperparameters
-    total_timesteps = 500000
-    learning_rate = 0.0003
-    batch_size = 128
-    n_steps = 2048
-    n_epochs = 10
-    gamma = 0.99
-    gae_lambda = 0.95
-    clip_range = 0.2
-    ent_coef = 0.01
-    max_steps = 100
-    
-    print("="*60)
-    print("OT-2 RL Training")
-    print("="*60)
-    print(f"Observation: 4D [dir_x, dir_y, dir_z, distance]")
-    print(f"Direction is NORMALIZED (unit vector)")
-    print(f"Optimal policy: action = obs[:3]")
-    print(f"Total Timesteps: {total_timesteps:,}")
-    print("-"*60)
-    
-    task.connect({
-        'total_timesteps': total_timesteps,
-        'learning_rate': learning_rate,
-        'batch_size': batch_size,
-        'n_steps': n_steps,
-        'n_epochs': n_epochs,
-        'max_steps': max_steps,
-        'observation': '4D_normalized_direction'
-    })
-    
-    env = OT2Env(render=False, max_steps=max_steps)
-    env = Monitor(env)
-    
-    eval_env = OT2Env(render=False, max_steps=max_steps)
-    eval_env = Monitor(eval_env)
-    
-    # Small network - simple task
-    policy_kwargs = dict(
-        net_arch=dict(pi=[64, 64], vf=[64, 64])
+
+def main():
+    args = parse_args()
+
+    print("=" * 60)
+    print("  OT-2 RL Training")
+    print("=" * 60)
+    print(f"  Algorithm      : {args.algo}")
+    print(f"  Learning rate  : {args.lr}")
+    print(f"  Batch size     : {args.batch_size}")
+    print(f"  Total timesteps: {args.total_timesteps}")
+    print(f"  Gamma          : {args.gamma}")
+    print(f"  Max steps/ep   : {args.max_steps}")
+    print(f"  Substeps       : {args.substeps}")
+    print(f"  Eval freq      : {args.eval_freq}")
+    print(f"  WandB          : {args.wandb}")
+    print(f"  Seed           : {args.seed}")
+    print("=" * 60)
+
+    # WandB init
+    if args.wandb:
+        import wandb
+        wandb.init(
+            project=args.wandb_project,
+            config=vars(args),
+            name=f"{args.algo}_lr{args.lr}_bs{args.batch_size}_{int(time.time())}",
+        )
+
+    # Create environments
+    os.makedirs("models", exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
+
+    train_env = Monitor(
+        OT2GymWrapper(max_steps=args.max_steps, num_substeps=args.substeps),
+        filename="logs/train"
     )
-    
-    model = PPO(
-        'MlpPolicy',
-        env,
-        learning_rate=learning_rate,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        n_epochs=n_epochs,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        clip_range=clip_range,
-        ent_coef=ent_coef,
-        policy_kwargs=policy_kwargs,
-        verbose=1
+    eval_env = OT2GymWrapper(max_steps=args.max_steps, num_substeps=args.substeps)
+
+    # Create model
+    algo_cls = {"PPO": PPO, "SAC": SAC, "TD3": TD3}[args.algo]
+
+    if args.algo == "PPO":
+        model = algo_cls(
+            "MlpPolicy",
+            train_env,
+            learning_rate=args.lr,
+            batch_size=args.batch_size,
+            n_steps=args.n_steps,
+            gamma=args.gamma,
+            verbose=1,
+            seed=args.seed,
+            tensorboard_log="logs/tensorboard",
+            policy_kwargs=dict(net_arch=[256, 256]),
+        )
+    else:
+        # SAC / TD3
+        model = algo_cls(
+            "MlpPolicy",
+            train_env,
+            learning_rate=args.lr,
+            batch_size=args.batch_size,
+            gamma=args.gamma,
+            verbose=1,
+            seed=args.seed,
+            tensorboard_log="logs/tensorboard",
+            policy_kwargs=dict(net_arch=[256, 256]),
+        )
+
+    # Callbacks
+    metrics_cb = MetricsCallback(
+        eval_env=eval_env,
+        eval_freq=args.eval_freq,
+        use_wandb=args.wandb,
     )
-    
-    callbacks = [
-        ClearMLCallback(),
-        EvalCallback(eval_env, best_model_save_path='./models/', eval_freq=10000, verbose=1)
-    ]
-    
-    print("\nStarting training...")
-    model.learn(total_timesteps=total_timesteps, callback=callbacks, progress_bar=True)
-    
-    model.save("trained_model")
-    task.upload_artifact("model", artifact_object="trained_model.zip")
-    
-    import os
-    if os.path.exists("./models/best_model.zip"):
-        task.upload_artifact("best_model", artifact_object="./models/best_model.zip")
-    
-    try:
-        env.close()
-        eval_env.close()
-    except:
-        pass
-    
-    print("\nDone!")
+
+    checkpoint_cb = CheckpointCallback(
+        save_freq=50000,
+        save_path="models/",
+        name_prefix="rl_model",
+    )
+
+    # Train
+    print(f"\nStarting training for {args.total_timesteps} timesteps...")
+    start_time = time.time()
+
+    model.learn(
+        total_timesteps=args.total_timesteps,
+        callback=[metrics_cb, checkpoint_cb],
+        progress_bar=True,
+    )
+
+    elapsed = time.time() - start_time
+    print(f"\nTraining complete in {elapsed/60:.1f} minutes")
+
+    # Save final model
+    model.save("models/final_model")
+    print(f"Final model saved to models/final_model")
+    print(f"Best model saved to models/best_model")
+
+    if args.wandb:
+        import wandb
+        wandb.finish()
+
+    train_env.close()
+    eval_env.close()
 
 
 if __name__ == "__main__":
-    train()
+    main()

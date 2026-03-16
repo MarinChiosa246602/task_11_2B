@@ -1,395 +1,187 @@
 """
 PID vs RL Controller Comparison
 ================================
-Compare performance of PID and RL controllers on the same target positions.
 
-Metrics:
-- Overshoot: Maximum distance past the target
-- Steady State Error: Final positioning error
-- Response Time: Time to reach within threshold of target
-- Trajectory smoothness
+Runs both controllers on the same 4 targets and produces comparison plots.
+
+Usage: python compare_controllers.py --rl_model models/best_model
 """
 
+import argparse
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from ot2_gym_wrapper import OT2Env
+import os
+import sys
 
-# Try to import RL model
-try:
-    from stable_baselines3 import PPO
-    RL_AVAILABLE = True
-except ImportError:
-    RL_AVAILABLE = False
-    print("Warning: stable_baselines3 not available, RL comparison disabled")
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+# Add task10 to path for PID imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'task10_pid_controller'))
 
-# =============================================================================
-# PID Controller
-# =============================================================================
-
-class PIDController:
-    """PID Controller for OT-2 positioning."""
-    
-    def __init__(self, Kp=10.0, Ki=1.0, Kd=2.0):
-        self.Kp = Kp
-        self.Ki = Ki
-        self.Kd = Kd
-        self.integral = np.zeros(3)
-        self.previous_error = np.zeros(3)
-        self.dt = 1/240  # Simulation timestep
-        
-    def reset(self):
-        self.integral = np.zeros(3)
-        self.previous_error = np.zeros(3)
-    
-    def compute(self, current_pos, target_pos):
-        """Compute PID control action."""
-        error = target_pos - current_pos
-        
-        # Proportional
-        P = self.Kp * error
-        
-        # Integral
-        self.integral += error * self.dt
-        I = self.Ki * self.integral
-        
-        # Derivative
-        derivative = (error - self.previous_error) / self.dt
-        D = self.Kd * derivative
-        
-        self.previous_error = error.copy()
-        
-        # Compute action and clip to [-1, 1]
-        action = P + I + D
-        action = np.clip(action, -1.0, 1.0)
-        
-        return action.astype(np.float32)
+from stable_baselines3 import PPO, SAC, TD3
+from ot2_gym_wrapper import OT2GymWrapper
 
 
-# =============================================================================
-# RL Controller Wrapper
-# =============================================================================
-
-class RLController:
-    """Wrapper for trained RL model."""
-    
-    def __init__(self, model_path="model/best_model"):
-        self.model = PPO.load(model_path)
-    
-    def reset(self):
-        pass  # RL model is stateless
-    
-    def predict(self, obs):
-        action, _ = self.model.predict(obs, deterministic=True)
-        return action
+TARGETS = [
+    [0.05, 0.05, 0.18],
+    [0.08, 0.03, 0.20],
+    [0.03, 0.07, 0.19],
+    [0.07, 0.00, 0.17],
+]
 
 
-# =============================================================================
-# Evaluation Functions
-# =============================================================================
-
-def evaluate_controller(env, controller, controller_type, n_episodes=20, max_steps=100):
-    """
-    Evaluate a controller and collect performance metrics.
-    
-    Returns dict with:
-    - steady_state_errors: Final distance to target for each episode
-    - response_times: Steps to reach within 5mm of target
-    - overshoots: Maximum overshoot past target
-    - trajectories: Distance over time for each episode
-    """
-    
-    results = {
-        'steady_state_errors': [],
-        'response_times': [],
-        'overshoots': [],
-        'trajectories': [],
-        'successes': []
-    }
-    
-    for ep in range(n_episodes):
-        obs, _ = env.reset()
-        controller.reset()
-        
-        # Get initial positions based on observation format
-        if len(obs) == 4:  # 4D: [dir_x, dir_y, dir_z, dist_norm]
-            # Need to track positions differently for 4D obs
-            initial_distance = obs[3] * 0.3  # Unnormalize
-            goal_pos = env.goal_position
-            pipette_pos = env.pipette_position
-        elif len(obs) == 6:  # 6D: [pipette_xyz, goal_xyz]
-            pipette_pos = obs[:3]
-            goal_pos = obs[3:6]
-            initial_distance = np.linalg.norm(pipette_pos - goal_pos)
-        elif len(obs) == 10:  # 10D: [delta, dist, pipette, goal]
-            pipette_pos = obs[4:7]
-            goal_pos = obs[7:10]
-            initial_distance = np.linalg.norm(pipette_pos - goal_pos)
-        else:
-            initial_distance = 0.15  # Default
-            goal_pos = np.zeros(3)
-        
-        trajectory = [initial_distance]
-        min_distance = initial_distance
-        response_time = max_steps  # Default if never reached
-        reached_threshold = False
-        
-        for step in range(max_steps):
-            # Get action based on controller type
-            if controller_type == 'PID':
-                # PID needs current and target positions
-                if hasattr(env, 'pipette_position') and hasattr(env, 'goal_position'):
-                    current_pos = env.pipette_position
-                    target_pos = env.goal_position
-                else:
-                    # Extract from observation
-                    if len(obs) == 6:
-                        current_pos = obs[:3]
-                        target_pos = obs[3:6]
-                    elif len(obs) == 10:
-                        current_pos = obs[4:7]
-                        target_pos = obs[7:10]
-                    else:
-                        current_pos = np.zeros(3)
-                        target_pos = np.zeros(3)
-                action = controller.compute(current_pos, target_pos)
-            else:  # RL
-                action = controller.predict(obs)
-            
-            obs, reward, terminated, truncated, info = env.step(action)
-            
-            # Get current distance
-            distance = info.get('distance', 0)
-            trajectory.append(distance)
-            
-            # Track minimum distance (for overshoot calculation)
-            if distance < min_distance:
-                min_distance = distance
-            
-            # Check if reached threshold (5mm)
-            if distance < 0.005 and not reached_threshold:
-                response_time = step + 1
-                reached_threshold = True
-            
-            if terminated:
-                break
-        
-        # Calculate metrics
-        final_distance = trajectory[-1]
-        
-        # Overshoot: if we got closer than final position, that's overshoot
-        overshoot = max(0, final_distance - min_distance)
-        
-        results['steady_state_errors'].append(final_distance)
-        results['response_times'].append(response_time)
-        results['overshoots'].append(overshoot)
-        results['trajectories'].append(trajectory)
-        results['successes'].append(final_distance < 0.001)
-    
-    return results
+def load_model(path):
+    for cls in [PPO, SAC, TD3]:
+        try:
+            return cls.load(path)
+        except:
+            continue
+    raise ValueError(f"Cannot load {path}")
 
 
-def print_comparison(pid_results, rl_results):
-    """Print comparison table."""
-    
-    print("\n" + "="*70)
-    print("CONTROLLER COMPARISON RESULTS")
-    print("="*70)
-    
-    print("\n{:<30} {:>15} {:>15}".format("Metric", "PID", "RL"))
-    print("-"*70)
-    
-    # Steady State Error
-    pid_sse = np.mean(pid_results['steady_state_errors']) * 1000
-    rl_sse = np.mean(rl_results['steady_state_errors']) * 1000
-    pid_sse_std = np.std(pid_results['steady_state_errors']) * 1000
-    rl_sse_std = np.std(rl_results['steady_state_errors']) * 1000
-    print("{:<30} {:>12.3f} mm {:>12.3f} mm".format(
-        "Steady State Error (mean)", pid_sse, rl_sse))
-    print("{:<30} {:>12.3f} mm {:>12.3f} mm".format(
-        "Steady State Error (std)", pid_sse_std, rl_sse_std))
-    
-    # Response Time
-    pid_rt = np.mean(pid_results['response_times'])
-    rl_rt = np.mean(rl_results['response_times'])
-    print("{:<30} {:>11.1f} steps {:>10.1f} steps".format(
-        "Response Time (to 5mm)", pid_rt, rl_rt))
-    
-    # Overshoot
-    pid_os = np.mean(pid_results['overshoots']) * 1000
-    rl_os = np.mean(rl_results['overshoots']) * 1000
-    print("{:<30} {:>12.3f} mm {:>12.3f} mm".format(
-        "Overshoot (mean)", pid_os, rl_os))
-    
-    # Success Rate
-    pid_sr = np.mean(pid_results['successes']) * 100
-    rl_sr = np.mean(rl_results['successes']) * 100
-    print("{:<30} {:>13.1f} % {:>13.1f} %".format(
-        "Success Rate (<1mm)", pid_sr, rl_sr))
-    
-    # Min/Max errors
-    pid_min = np.min(pid_results['steady_state_errors']) * 1000
-    rl_min = np.min(rl_results['steady_state_errors']) * 1000
-    pid_max = np.max(pid_results['steady_state_errors']) * 1000
-    rl_max = np.max(rl_results['steady_state_errors']) * 1000
-    print("{:<30} {:>12.3f} mm {:>12.3f} mm".format(
-        "Min Error", pid_min, rl_min))
-    print("{:<30} {:>12.3f} mm {:>12.3f} mm".format(
-        "Max Error", pid_max, rl_max))
-    
-    print("-"*70)
-    
-    # Recommendation
-    print("\nRECOMMENDATION:")
-    
-    scores = {'PID': 0, 'RL': 0}
-    
-    if pid_sse < rl_sse:
-        scores['PID'] += 1
-        print("  ✓ PID has lower steady state error")
-    else:
-        scores['RL'] += 1
-        print("  ✓ RL has lower steady state error")
-    
-    if pid_rt < rl_rt:
-        scores['PID'] += 1
-        print("  ✓ PID has faster response time")
-    else:
-        scores['RL'] += 1
-        print("  ✓ RL has faster response time")
-    
-    if pid_os < rl_os:
-        scores['PID'] += 1
-        print("  ✓ PID has less overshoot")
-    else:
-        scores['RL'] += 1
-        print("  ✓ RL has less overshoot")
-    
-    if pid_sr > rl_sr:
-        scores['PID'] += 1
-        print("  ✓ PID has higher success rate")
-    else:
-        scores['RL'] += 1
-        print("  ✓ RL has higher success rate")
-    
-    winner = "PID" if scores['PID'] > scores['RL'] else "RL"
-    print(f"\n  → RECOMMENDED CONTROLLER: {winner} (Score: PID={scores['PID']}, RL={scores['RL']})")
-    print("="*70)
-    
-    return winner
+def run_rl(model, target, max_steps=500):
+    """Run RL controller on a target."""
+    env = OT2GymWrapper(max_steps=max_steps, num_substeps=10)
+    obs, info = env.reset()
+    env.target = np.array(target, dtype=np.float32)
+    obs = env._get_obs()
+
+    errors = []
+    for _ in range(max_steps):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, _, terminated, truncated, info = env.step(action)
+        errors.append(info['error'])
+        if terminated or truncated:
+            break
+
+    env.close()
+    return np.array(errors)
 
 
-def plot_comparison(pid_results, rl_results, save_path="comparison_plot.png"):
-    """Create comparison plots."""
-    
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    
-    # Plot 1: Trajectory comparison (first 5 episodes)
-    ax1 = axes[0, 0]
-    for i in range(min(5, len(pid_results['trajectories']))):
-        ax1.plot(pid_results['trajectories'][i], 'b-', alpha=0.5, label='PID' if i==0 else '')
-        ax1.plot(rl_results['trajectories'][i], 'r-', alpha=0.5, label='RL' if i==0 else '')
-    ax1.axhline(y=0.001, color='g', linestyle='--', label='Target (1mm)')
-    ax1.set_xlabel('Steps')
-    ax1.set_ylabel('Distance to Goal (m)')
-    ax1.set_title('Trajectory Comparison')
-    ax1.legend()
-    ax1.set_yscale('log')
-    
-    # Plot 2: Steady State Error Distribution
-    ax2 = axes[0, 1]
-    pid_errors = np.array(pid_results['steady_state_errors']) * 1000
-    rl_errors = np.array(rl_results['steady_state_errors']) * 1000
-    ax2.boxplot([pid_errors, rl_errors], labels=['PID', 'RL'])
-    ax2.axhline(y=1, color='g', linestyle='--', label='Target (1mm)')
-    ax2.set_ylabel('Steady State Error (mm)')
-    ax2.set_title('Steady State Error Distribution')
-    ax2.legend()
-    
-    # Plot 3: Response Time Comparison
-    ax3 = axes[1, 0]
-    ax3.bar(['PID', 'RL'], 
-            [np.mean(pid_results['response_times']), np.mean(rl_results['response_times'])],
-            yerr=[np.std(pid_results['response_times']), np.std(rl_results['response_times'])],
-            capsize=5, color=['blue', 'red'], alpha=0.7)
-    ax3.set_ylabel('Response Time (steps)')
-    ax3.set_title('Response Time to 5mm')
-    
-    # Plot 4: Success Rate
-    ax4 = axes[1, 1]
-    pid_sr = np.mean(pid_results['successes']) * 100
-    rl_sr = np.mean(rl_results['successes']) * 100
-    ax4.bar(['PID', 'RL'], [pid_sr, rl_sr], color=['blue', 'red'], alpha=0.7)
-    ax4.set_ylabel('Success Rate (%)')
-    ax4.set_title('Success Rate (<1mm)')
-    ax4.set_ylim(0, 100)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    print(f"\nPlot saved to: {save_path}")
-    plt.show()
+def run_pid(target, max_steps=500):
+    """Run PID controller on a target (imports from task10)."""
+    try:
+        from pid_controller import (PIDController, TUNED_GAINS, OUTPUT_LIMITS,
+                                     SUBSTEPS, fix_baseplane, teleport_pipette,
+                                     FilteredPosition)
+        from sim_class import Simulation
+    except ImportError:
+        print("  [warn] Could not import PID controller from task10. Skipping PID.")
+        return None
 
+    sim = Simulation(num_agents=1, render=False)
+    fix_baseplane(sim)
+    dt = 0.01 * SUBSTEPS
 
-# =============================================================================
-# Main
-# =============================================================================
+    pid_x = PIDController(TUNED_GAINS['x'][0], TUNED_GAINS['x'][1], TUNED_GAINS['x'][2], dt, OUTPUT_LIMITS['x'])
+    pid_y = PIDController(TUNED_GAINS['y'][0], TUNED_GAINS['y'][1], TUNED_GAINS['y'][2], dt, OUTPUT_LIMITS['y'])
+    pid_z = PIDController(TUNED_GAINS['z'][0], TUNED_GAINS['z'][1], TUNED_GAINS['z'][2], dt, OUTPUT_LIMITS['z'])
+    pos_filter = FilteredPosition(alpha=0.3)
+    target_np = np.array(target)
+
+    teleport_pipette(sim, target[0], target[1], target[2])
+    for _ in range(30):
+        sim.run([[0, 0, 0, 0]])
+
+    state = sim.run([[0, 0, 0, 0]])
+    robot_key = list(state.keys())[0]
+    pos = pos_filter.update(state[robot_key]["pipette_position"])
+
+    errors = []
+    for _ in range(max_steps):
+        vx = pid_x.compute(target_np[0], pos[0])
+        vy = pid_y.compute(target_np[1], pos[1])
+        vz = pid_z.compute(target_np[2], pos[2])
+        state = sim.run([[vx, vy, vz, 0]], num_steps=SUBSTEPS)
+        pos = pos_filter.update(state[robot_key]["pipette_position"])
+        errors.append(np.linalg.norm(target_np - pos))
+
+    sim.close()
+    return np.array(errors)
+
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Compare PID vs RL controllers')
-    parser.add_argument('--model_path', type=str, default='model/best_model',
-                        help='Path to trained RL model')
-    parser.add_argument('--n_episodes', type=int, default=20,
-                        help='Number of episodes to evaluate')
-    parser.add_argument('--max_steps', type=int, default=100,
-                        help='Max steps per episode')
-    parser.add_argument('--no_plot', action='store_true',
-                        help='Skip plotting')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rl_model", type=str, default="models/best_model")
     args = parser.parse_args()
-    
-    print("="*70)
-    print("PID vs RL CONTROLLER COMPARISON")
-    print("="*70)
-    
-    # Create environment
-    env = OT2Env(render=False, max_steps=args.max_steps)
-    
-    # Initialize controllers
-    pid_controller = PIDController(Kp=10.0, Ki=1.0, Kd=2.0)
-    
-    print("\n[1/2] Evaluating PID Controller...")
-    pid_results = evaluate_controller(env, pid_controller, 'PID', 
-                                       n_episodes=args.n_episodes, 
-                                       max_steps=args.max_steps)
-    
-    if RL_AVAILABLE:
-        try:
-            rl_controller = RLController(args.model_path)
-            print("[2/2] Evaluating RL Controller...")
-            rl_results = evaluate_controller(env, rl_controller, 'RL',
-                                             n_episodes=args.n_episodes,
-                                             max_steps=args.max_steps)
-        except Exception as e:
-            print(f"Error loading RL model: {e}")
-            print("Creating dummy RL results for comparison...")
-            rl_results = pid_results.copy()  # Placeholder
-    else:
-        print("RL not available, using dummy results")
-        rl_results = pid_results.copy()
-    
-    env.close()
-    
-    # Print comparison
-    winner = print_comparison(pid_results, rl_results)
-    
-    # Plot comparison
-    if not args.no_plot:
-        try:
-            plot_comparison(pid_results, rl_results)
-        except Exception as e:
-            print(f"Could not create plot: {e}")
-    
-    return winner
+
+    os.makedirs("results", exist_ok=True)
+
+    print("=" * 60)
+    print("  PID vs RL Controller Comparison")
+    print("=" * 60)
+
+    model = load_model(args.rl_model)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
+
+    dt = 0.01 * 10
+    summary = []
+
+    for i, target in enumerate(TARGETS):
+        print(f"\nTarget {i+1}: {target}")
+
+        # RL
+        rl_errors = run_rl(model, target)
+        rl_final = rl_errors[-1]
+        print(f"  RL:  final={rl_final*1000:.2f}mm  steps={len(rl_errors)}")
+
+        # PID
+        pid_errors = run_pid(target)
+        pid_final = pid_errors[-1] if pid_errors is not None else None
+        if pid_final is not None:
+            print(f"  PID: final={pid_final*1000:.2f}mm  steps={len(pid_errors)}")
+
+        summary.append({
+            "target": target,
+            "rl_final": rl_final,
+            "pid_final": pid_final,
+        })
+
+        # Plot
+        ax = axes[i]
+        rl_times = np.arange(len(rl_errors)) * dt
+        ax.plot(rl_times, rl_errors * 1000, 'b-', lw=1.2, label=f'RL ({rl_final*1000:.1f}mm)')
+        if pid_errors is not None:
+            pid_times = np.arange(len(pid_errors)) * dt
+            ax.plot(pid_times, pid_errors * 1000, 'r-', lw=1.2, label=f'PID ({pid_final*1000:.1f}mm)')
+        ax.axhline(1, color='g', ls='--', alpha=0.5, label='1mm')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Error (mm)')
+        ax.set_title(f'Target {i+1}: {target}')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    plt.suptitle('PID vs RL Controller Comparison', fontsize=14)
+    plt.tight_layout()
+    plt.savefig('results/pid_vs_rl_comparison.png', dpi=150)
+    plt.close()
+    print(f"\nComparison plot: results/pid_vs_rl_comparison.png")
+
+    # Bar chart summary
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(TARGETS))
+    width = 0.35
+    rl_vals = [s['rl_final'] * 1000 for s in summary]
+    pid_vals = [s['pid_final'] * 1000 if s['pid_final'] else 0 for s in summary]
+
+    ax.bar(x - width/2, pid_vals, width, label='PID', color='coral')
+    ax.bar(x + width/2, rl_vals, width, label='RL', color='steelblue')
+    ax.axhline(1, color='g', ls='--', label='1mm target')
+    ax.set_xlabel('Target')
+    ax.set_ylabel('Final Error (mm)')
+    ax.set_title('Final Error Comparison: PID vs RL')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'T{i+1}' for i in range(len(TARGETS))])
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    plt.savefig('results/pid_vs_rl_bar.png', dpi=150)
+    plt.close()
+    print(f"Bar chart: results/pid_vs_rl_bar.png")
 
 
 if __name__ == "__main__":

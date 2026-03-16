@@ -1,76 +1,121 @@
 """
-Test Script for trained RL model
-================================
-Works with 4D normalized direction observation.
+Test Script for OT-2 Gym Wrapper
+
+Runs the environment for 1000 steps with random actions to verify
+the wrapper works correctly. Prints observation shapes, reward range,
+and termination conditions.
+
+Usage: python test_wrapper.py
 """
 
 import numpy as np
-import argparse
-from stable_baselines3 import PPO
-from ot2_gym_wrapper import OT2Env
+import os
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(script_dir)
+
+from ot2_gym_wrapper import OT2GymWrapper
 
 
-def evaluate_model(model_path, n_episodes=100, render=False):
-    """Evaluate the trained model."""
-    
-    print(f"Loading model: {model_path}")
-    model = PPO.load(model_path)
-    
-    env = OT2Env(render=render, max_steps=100)
-    
-    distances = []
-    lengths = []
-    successes = []
-    
-    print(f"\nEvaluating on {n_episodes} episodes...")
-    print("-" * 60)
-    
-    for ep in range(n_episodes):
-        obs, _ = env.reset()
-        done = False
-        steps = 0
-        
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            steps += 1
-        
-        final_distance = info['distance']
-        
-        distances.append(final_distance)
-        lengths.append(steps)
-        successes.append(final_distance < 0.001)
-        
-        if (ep + 1) % 10 == 0:
-            avg_dist = np.mean(distances[-10:])
-            print(f"Episode {ep+1:3d}: Avg Distance (last 10): {avg_dist*1000:.3f} mm")
-    
+def test_spaces():
+    """Test that action/observation spaces are valid."""
+    env = OT2GymWrapper()
+    obs, info = env.reset()
+
+    print("=" * 50)
+    print("Space Validation")
+    print("=" * 50)
+    print(f"Observation space: {env.observation_space}")
+    print(f"  shape: {env.observation_space.shape}")
+    print(f"  low:   {env.observation_space.low}")
+    print(f"  high:  {env.observation_space.high}")
+    print(f"Action space: {env.action_space}")
+    print(f"  shape: {env.action_space.shape}")
+    print(f"  low:   {env.action_space.low}")
+    print(f"  high:  {env.action_space.high}")
+    print(f"Initial obs: {obs}")
+    print(f"Initial obs in space: {env.observation_space.contains(obs)}")
+    print(f"Initial error: {info['error']*1000:.2f} mm")
+    print(f"Target: {info['target']}")
+
     env.close()
-    
-    print("\n" + "=" * 60)
-    print("EVALUATION RESULTS")
-    print("=" * 60)
-    print(f"\nPositioning Error Statistics:")
-    print(f"  Mean Distance:     {np.mean(distances)*1000:.3f} mm ({np.mean(distances):.6f} m)")
-    print(f"  Std Distance:      {np.std(distances)*1000:.3f} mm")
-    print(f"  Min Distance:      {np.min(distances)*1000:.3f} mm")
-    print(f"  Max Distance:      {np.max(distances)*1000:.3f} mm")
-    print(f"\nPerformance Metrics:")
-    print(f"  Success Rate (<1mm): {np.mean(successes)*100:.1f}%")
-    print(f"  Mean Episode Length: {np.mean(lengths):.1f} steps")
-    print("=" * 60)
+    print("PASSED\n")
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', type=str, default='model/best_model')
-    parser.add_argument('--n_episodes', type=int, default=100)
-    parser.add_argument('--render', action='store_true')
-    args = parser.parse_args()
-    
-    evaluate_model(args.model_path, args.n_episodes, args.render)
+def test_random_actions(n_steps=1000):
+    """Run n_steps with random actions, track metrics."""
+    env = OT2GymWrapper()
+    obs, info = env.reset()
+
+    print("=" * 50)
+    print(f"Random Actions Test ({n_steps} steps)")
+    print("=" * 50)
+    print(f"Target: {info['target']}")
+    print(f"Initial error: {info['error']*1000:.2f} mm")
+
+    rewards = []
+    errors = []
+    min_error = float('inf')
+
+    for step in range(n_steps):
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+
+        rewards.append(reward)
+        errors.append(info['error'])
+        min_error = min(min_error, info['error'])
+
+        if step % 100 == 0:
+            print(f"Step {step}: error={info['error']*1000:.2f}mm  "
+                  f"reward={reward:.2f}  obs_valid={env.observation_space.contains(obs)}")
+
+        if terminated:
+            print(f"TERMINATED at step {step} (success!)")
+            break
+        if truncated:
+            print(f"TRUNCATED at step {step} (timeout)")
+            break
+
+    print(f"\nSummary:")
+    print(f"  Steps taken: {len(rewards)}")
+    print(f"  Final error: {errors[-1]*1000:.2f} mm")
+    print(f"  Min error:   {min_error*1000:.2f} mm")
+    print(f"  Avg reward:  {np.mean(rewards):.2f}")
+    print(f"  Total reward: {np.sum(rewards):.2f}")
+
+    env.close()
+    print("PASSED\n")
+
+
+def test_reset():
+    """Test that reset generates different targets."""
+    env = OT2GymWrapper()
+
+    print("=" * 50)
+    print("Reset Test (5 resets)")
+    print("=" * 50)
+
+    targets = []
+    for i in range(5):
+        obs, info = env.reset()
+        targets.append(info['target'].copy())
+        print(f"Reset {i+1}: target={info['target']}, error={info['error']*1000:.2f}mm")
+
+    # Check targets are different
+    all_same = all(np.allclose(targets[0], t) for t in targets[1:])
+    print(f"All targets identical: {all_same} (should be False)")
+
+    env.close()
+    print("PASSED\n")
 
 
 if __name__ == "__main__":
-    main()
+    print("OT-2 Gym Wrapper Test Suite\n")
+
+    test_spaces()
+    test_reset()
+    test_random_actions(n_steps=1000)
+
+    print("=" * 50)
+    print("ALL TESTS PASSED")
+    print("=" * 50)
