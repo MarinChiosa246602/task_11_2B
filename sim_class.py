@@ -40,7 +40,7 @@ class Simulation:
         # Reset the camera with the specified parameters
         p.resetDebugVisualizerCamera(cameraDistance, cameraYaw, cameraPitch, cameraTargetPosition)
 
-        self.baseplaneId = p.loadURDF("ot_2_simulation_v6.urdf")
+        self.baseplaneId = p.loadURDF("plane.urdf")
         # add collision shape to the plane
         #p.createCollisionShape(shapeType=p.GEOM_BOX, halfExtents=[30, 305, 0.001])
 
