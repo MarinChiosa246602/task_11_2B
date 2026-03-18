@@ -64,26 +64,29 @@ class OT2Env(gym.Env):
     
     def _fix_baseplane(self):
         """Fix the duplicate baseplane URDF that interferes with the robot."""
-        base_id = self.sim.baseplaneId
-        
-        # Move far underground
-        p.resetBasePositionAndOrientation(base_id, [0, 0, -10], [0, 0, 0, 1])
-        
-        # Lock joints
-        for joint_idx in range(3):
-            p.setJointMotorControl2(
-                base_id, joint_idx, p.VELOCITY_CONTROL,
-                targetVelocity=0, force=10000
-            )
-        
-        # Disable collision with robot
-        for robot_id in self.sim.robotIds:
-            p.setCollisionFilterPair(base_id, robot_id, -1, -1, enableCollision=0)
-            for i in range(3):
-                for j in range(3):
-                    p.setCollisionFilterPair(base_id, robot_id, i, j, enableCollision=0)
-                p.setCollisionFilterPair(base_id, robot_id, -1, j, enableCollision=0)
-                p.setCollisionFilterPair(base_id, robot_id, i, -1, enableCollision=0)
+        try:
+            base_id = self.sim.baseplaneId
+            
+            # Move far underground
+            p.resetBasePositionAndOrientation(base_id, [0, 0, -10], [0, 0, 0, 1])
+            
+            # Lock however many joints exist
+            num_joints = p.getNumJoints(base_id)
+            for joint_idx in range(num_joints):
+                p.setJointMotorControl2(
+                    base_id, joint_idx, p.VELOCITY_CONTROL,
+                    targetVelocity=0, force=10000
+                )
+            
+            # Disable collision with robot
+            for robot_id in self.sim.robotIds:
+                p.setCollisionFilterPair(base_id, robot_id, -1, -1, enableCollision=0)
+                for i in range(num_joints):
+                    p.setCollisionFilterPair(base_id, robot_id, i, -1, enableCollision=0)
+                    for j in range(p.getNumJoints(robot_id)):
+                        p.setCollisionFilterPair(base_id, robot_id, i, j, enableCollision=0)
+        except Exception as e:
+            print(f"Warning: _fix_baseplane failed: {e} (continuing without fix)")
     
     def reset(self, seed=None):
         """Reset environment to initial state with new random goal."""
