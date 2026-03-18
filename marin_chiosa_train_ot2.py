@@ -27,10 +27,10 @@ parser.add_argument("--learning_rate", type=float, default=0.0003)
 parser.add_argument("--batch_size", type=int, default=64)
 parser.add_argument("--n_steps", type=int, default=2048)
 parser.add_argument("--n_epochs", type=int, default=10)
-parser.add_argument("--total_timesteps", type=int, default=500000)
+parser.add_argument("--total_timesteps", type=int, default=2000000)
 parser.add_argument("--gamma", type=float, default=0.99)
-parser.add_argument("--max_steps", type=int, default=300)
-parser.add_argument("--target_threshold", type=float, default=0.005)
+parser.add_argument("--max_steps", type=int, default=500)
+parser.add_argument("--target_threshold", type=float, default=0.001)
 args = parser.parse_args()
 
 # Send to GPU server
@@ -40,7 +40,7 @@ task.execute_remotely(queue_name="default")
 # Callback
 # ============================================================================
 class OT2Callback(BaseCallback):
-    def __init__(self, threshold=0.005, verbose=0):
+    def __init__(self, threshold=0.001, verbose=0):
         super().__init__(verbose)
         self.threshold = threshold
         self.episode_successes = []
