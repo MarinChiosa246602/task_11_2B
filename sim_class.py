@@ -326,8 +326,6 @@ class Simulation:
             pipette_position = [robot_position[0] + self.pipette_offset[0],
                                 robot_position[1] + self.pipette_offset[1],
                                 robot_position[2] + self.pipette_offset[2]]
-            # Round pipette position to 4 decimal places
-            pipette_position = [round(num, 4) for num in pipette_position]
 
             # Store information in the dictionary
             states[f'robotId_{robotId}'] = {
