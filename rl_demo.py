@@ -11,8 +11,8 @@ def normalize_position(position, ws_low, ws_high):
     return (2.0 * (position - ws_low) / (ws_high - ws_low) - 1.0).astype(np.float32)
 
 
-def sweep_axis(sim, robot_key, target_np, axis, speed, max_sweep_steps=500):
-    """Final-polish axis sweep to find closest physics grid point."""
+def sweep_axis(sim, robot_key, target_np, axis, speed, max_sweep_steps=600):
+    """Sweep along a single axis, find closest grid point."""
     state = sim.run([[0, 0, 0, 0]])
     pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
 
@@ -58,9 +58,9 @@ def sweep_axis(sim, robot_key, target_np, axis, speed, max_sweep_steps=500):
 
 
 def final_polish(sim, robot_key, target_np):
-    """Quick axis sweep refinement after RL converges."""
+    """Multi-pass axis sweep refinement."""
     TOLERANCE = 0.00001
-    speeds = [0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002]
+    speeds = [0.003, 0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002]
 
     state = sim.run([[0, 0, 0, 0]])
     pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
@@ -74,81 +74,98 @@ def final_polish(sim, robot_key, target_np):
             if best_dist < TOLERANCE:
                 return best_dist
 
+        # Diagonal sweeps
+        for axes in [(0, 1), (0, 2), (1, 2)]:
+            state = sim.run([[0, 0, 0, 0]])
+            pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
+            error = target_np - pos
+            dist = np.linalg.norm(error)
+
+            if dist < TOLERANCE:
+                best_dist = min(best_dist, dist)
+                break
+
+            vel = [0.0, 0.0, 0.0, 0.0]
+            for ax in axes:
+                vel[ax] = float(np.sign(error[ax]) * speed)
+
+            inc = 0
+            for _ in range(500):
+                state = sim.run([vel], num_steps=1)
+                pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
+                d = np.linalg.norm(target_np - pos)
+                if d < best_dist:
+                    best_dist = d
+                    inc = 0
+                else:
+                    inc += 1
+                if inc > 8 or d < TOLERANCE:
+                    break
+
+            for _ in range(10):
+                sim.run([[0, 0, 0, 0]])
+
+        if best_dist < TOLERANCE:
+            return best_dist
+
     return best_dist
 
 
 def move_to_target(sim, model, robot_key, target_np, ws_low, ws_high, max_steps=5000):
     """
-    RL-agent-driven positioning.
+    RL agent with MATCHING velocity scaling to training environment.
     
-    The RL agent does the work. Speed stays HIGH until very close:
-      >2mm:    full speed (1.0x)
-      0.5-2mm: 0.5x 
-      0.1-0.5mm: 0.2x
-      <0.1mm:  0.08x
-    
-    This keeps the agent moving and prevents premature stalling.
-    Only after RL converges at sub-0.1mm do we run axis sweep polish.
+    Training used: velocity = action * 1.5, num_steps=1
+    So we MUST use the same here for the model to work correctly.
     """
     TOLERANCE = 0.00001
+    # Must match training environment's max_velocity
+    MAX_VELOCITY = 1.5
 
     state = sim.run([[0, 0, 0, 0]])
     pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
 
-    best_dist = 999.0
-    dist_history = []
+    best_dist = np.linalg.norm(target_np - pos)
+    no_improve_count = 0
 
     for step in range(max_steps):
         error = target_np - pos
         dist = np.linalg.norm(error)
 
-        if dist < best_dist:
+        if dist < best_dist - 0.000005:
             best_dist = dist
+            no_improve_count = 0
+        else:
+            no_improve_count += 1
 
         if dist < TOLERANCE:
             print(f"    RL SUCCESS: {dist * 1000:.4f}mm at step {step}")
             return dist
 
-        # RL agent with distance-adaptive speed
+        # Build observation exactly like training
         obs = np.concatenate([
             normalize_position(pos, ws_low, ws_high),
             normalize_position(target_np, ws_low, ws_high)
         ], dtype=np.float32)
         action, _ = model.predict(obs, deterministic=True)
 
-        # Keep speed HIGH — only slow down significantly under 0.1mm
-        if dist > 0.002:        # >2mm: full speed
-            speed_mult = 1.0
-        elif dist > 0.0005:     # 0.5-2mm: half speed
-            speed_mult = 0.5
-        elif dist > 0.0001:     # 0.1-0.5mm: moderate
-            speed_mult = 0.2
-        else:                   # <0.1mm: careful
-            speed_mult = 0.08
+        # MATCH TRAINING: velocity = action * max_velocity
+        velocity = action * MAX_VELOCITY
 
-        velocity = action * speed_mult
-
+        # Send to sim with num_steps=1 (matches training)
         state = sim.run(
             [[float(velocity[0]), float(velocity[1]), float(velocity[2]), 0.0]],
             num_steps=1
         )
         pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
 
-        # Stall detection — only trigger when already close (<0.1mm)
-        dist_history.append(dist)
-        if len(dist_history) > 400:
-            dist_history.pop(0)
+        # Stall detection
+        if no_improve_count >= 300:
+            print(f"    RL stalled at {best_dist * 1000:.4f}mm (step {step}) — handing off")
+            break
 
         if step > 0 and step % 500 == 0:
             print(f"    RL step {step}: dist={dist * 1000:.4f}mm  best={best_dist * 1000:.4f}mm")
-
-        # Only detect stalls when under 0.1mm — don't give up too early
-        if len(dist_history) >= 400 and best_dist < 0.0001:
-            recent_min = min(dist_history[-400:])
-            recent_max = max(dist_history[-400:])
-            if recent_max - recent_min < 0.00005:
-                print(f"    RL converged at {best_dist * 1000:.4f}mm (step {step})")
-                break
 
     # Halt
     for _ in range(40):
@@ -189,7 +206,7 @@ def retract_pipette(sim, robot_key, retract_height=0.22):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="lr3e-4_b64_s2048.zip")
+    parser.add_argument("--model", type=str, default="lr3e-4_b128_s4096.zip")
     args = parser.parse_args()
 
     model = PPO.load(args.model.replace(".zip", ""))

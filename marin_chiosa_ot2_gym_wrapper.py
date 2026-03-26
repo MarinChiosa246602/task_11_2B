@@ -6,6 +6,20 @@ from sim_class import Simulation
 
 
 class OT2Env(gym.Env):
+    """
+    Improved OT-2 Gymnasium environment for sub-millimeter precision.
+    
+    Key improvements over original:
+    - Exponential distance reward: agent cares MORE as it gets closer
+    - Single sim step per action for fine-grained control
+    - Curriculum support: threshold tightens over training
+    - Progress reward: bonus for getting closer than previous best
+    - No coarse num_steps=5 — direct single-step control
+    
+    Observation: 6D [pos_x, pos_y, pos_z, goal_x, goal_y, goal_z] normalized
+    Action: 3D [vx, vy, vz] normalized to [-1, 1]
+    """
+    
     def __init__(self, render=False, max_steps=500, target_threshold=0.001):
         super(OT2Env, self).__init__()
         
