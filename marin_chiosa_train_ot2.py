@@ -8,6 +8,16 @@ import numpy as np
 
 # Import wrapper
 from marin_chiosa_ot2_gym_wrapper import OT2Env
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+PERSON_NAME = "marin_chiosa"
+BRANCH_NAME = "main"
+
+# ============================================================================
+# Custom Callback for OT2 Metrics
+# ============================================================================
 class OT2Callback(BaseCallback):
     
     def __init__(self, threshold=0.005, verbose=0):
@@ -72,7 +82,7 @@ class OT2Callback(BaseCallback):
 # ============================================================================
 task = Task.init(
     project_name='Mentor Group - Myrthe/Group 2', 
-    task_name=f'ot2_marin_v3',
+    task_name=f'ot2_train_marinv3',
 )
 
 task.set_repo(
@@ -102,7 +112,6 @@ task.execute_remotely(queue_name='default')
 # Everything below runs on the REMOTE machine
 # ============================================================================
 
-# Simple model name
 model_name = f"lr3e-4_b{args.batch_size}_s{args.n_steps}"
 
 print("="*60)

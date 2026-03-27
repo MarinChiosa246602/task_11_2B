@@ -7,20 +7,14 @@ from sim_class import Simulation
 
 class OT2Env(gym.Env):
     """
-    Improved OT-2 Gymnasium environment for sub-millimeter precision.
+    Custom Gymnasium environment for OT-2 robot control.
     
-    Key improvements over original:
-    - Exponential distance reward: agent cares MORE as it gets closer
-    - Single sim step per action for fine-grained control
-    - Curriculum support: threshold tightens over training
-    - Progress reward: bonus for getting closer than previous best
-    - No coarse num_steps=5 — direct single-step control
-    
-    Observation: 6D [pos_x, pos_y, pos_z, goal_x, goal_y, goal_z] normalized
-    Action: 3D [vx, vy, vz] normalized to [-1, 1]
+    Observation Space: 6D [current_x, current_y, current_z, goal_x, goal_y, goal_z] (normalized)
+    Action Space: 3D [x, y, z] velocities normalized to [-1, 1]
+    Reward: Time penalty + Distance penalty + Success bonus
     """
     
-    def __init__(self, render=False, max_steps=500, target_threshold=0.001):
+    def __init__(self, render=False, max_steps=300, target_threshold=0.001):
         super(OT2Env, self).__init__()
         
         self.render_mode = render
@@ -40,19 +34,15 @@ class OT2Env(gym.Env):
             low=-1.0, high=1.0, shape=(6,), dtype=np.float32
         )
         
-        # OT-2 workspace bounds
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1700], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
         
-        # Episode tracking
         self.steps = 0
         self.goal_position = None
         self.initial_distance = None
-        self.prev_distance = None
-        self.best_distance = None
     
     def _fix_baseplane(self):
-        """Fix duplicate baseplane URDF interference."""
+        """Fix the duplicate baseplane URDF that interferes with the robot."""
         try:
             base_id = self.sim.baseplaneId
             p.resetBasePositionAndOrientation(base_id, [0, 0, -10], [0, 0, 0, 1])
@@ -75,7 +65,6 @@ class OT2Env(gym.Env):
         if seed is not None:
             np.random.seed(seed)
         
-        # Random goal within workspace
         self.goal_position = np.random.uniform(
             self.workspace_low, self.workspace_high
         ).astype(np.float32)
@@ -84,44 +73,33 @@ class OT2Env(gym.Env):
         self._fix_baseplane()
         
         current_pos = self._extract_position(state_dict)
-        
         self.initial_distance = float(np.linalg.norm(current_pos - self.goal_position))
-        self.prev_distance = self.initial_distance
-        self.best_distance = self.initial_distance
-        self.steps = 0
         
         observation = np.concatenate([
             self._normalize_position(current_pos),
             self._normalize_position(self.goal_position)
         ], dtype=np.float32)
         
+        self.steps = 0
         return observation, {}
     
     def step(self, action):
         action = np.asarray(action, dtype=np.float32)
         
-        # Scale action — lower max velocity for finer control
-        max_velocity = 1.5
+        max_velocity = 2.0
         velocity = action * max_velocity
         
         full_action = [float(velocity[0]), float(velocity[1]), float(velocity[2]), 0.0]
-        
-        # SINGLE sim step for maximum control resolution
-        state_dict = self.sim.run([full_action], num_steps=1)
+        state_dict = self.sim.run([full_action], num_steps=5)
         
         current_pos = self._extract_position(state_dict)
-        distance = float(np.linalg.norm(current_pos - self.goal_position))
+        distance_to_goal = np.linalg.norm(current_pos - self.goal_position)
         
-        reward = self._calculate_reward(distance)
+        reward = self._calculate_reward(distance_to_goal)
         
-        terminated = bool(distance < self.target_threshold)
+        terminated = bool(distance_to_goal < self.target_threshold)
         self.steps += 1
         truncated = bool(self.steps >= self.max_steps)
-        
-        # Track for reward calculation
-        self.prev_distance = distance
-        if distance < self.best_distance:
-            self.best_distance = distance
         
         observation = np.concatenate([
             self._normalize_position(current_pos),
@@ -129,60 +107,18 @@ class OT2Env(gym.Env):
         ], dtype=np.float32)
         
         info = {
-            'distance_to_goal': distance,
+            'distance_to_goal': float(distance_to_goal),
             'current_position': current_pos.tolist(),
-            'goal_position': self.goal_position.tolist(),
-            'best_distance': self.best_distance,
+            'goal_position': self.goal_position.tolist()
         }
         
         return observation, reward, terminated, truncated, info
     
-    def _calculate_reward(self, distance):
-        """
-        Multi-component reward designed for sub-mm precision:
-        
-        1. Exponential closeness: -exp(k * distance) 
-           → Reward grows EXPONENTIALLY as agent gets closer
-           → Agent cares 10x more about 1mm→0mm than 10mm→9mm
-        
-        2. Progress reward: bonus for improving over previous step
-           → Incentivizes continuous movement toward goal
-        
-        3. New-best bonus: extra reward for beating the episode best
-           → Prevents settling at "good enough" distances
-        
-        4. Success bonus: large reward for reaching threshold
-        
-        5. Time penalty: small per-step cost to encourage efficiency
-        """
-        # 1. Exponential distance penalty (main signal)
-        # At 10mm: -exp(50*0.01) = -1.65
-        # At 1mm:  -exp(50*0.001) = -1.05
-        # At 0.1mm: -exp(50*0.0001) = -1.005
-        # The gradient is STEEPER when closer — agent learns to be precise
-        exp_penalty = -np.exp(50.0 * distance) + 1.0  # Shift so 0 distance = 0 penalty
-        
-        # 2. Progress reward
-        improvement = self.prev_distance - distance
-        progress_reward = 20.0 * improvement  # Positive when getting closer
-        
-        # 3. New-best bonus
-        new_best_bonus = 0.0
-        if distance < self.best_distance:
-            new_best_bonus = 5.0
-        
-        # 4. Success bonus (scaled by how fast)
-        success_bonus = 0.0
-        if distance < self.target_threshold:
-            # Bigger bonus for reaching goal faster
-            time_bonus = max(0, 1.0 - self.steps / self.max_steps)
-            success_bonus = 100.0 + 50.0 * time_bonus
-        
-        # 5. Small time penalty
-        time_penalty = -0.05
-        
-        reward = exp_penalty + progress_reward + new_best_bonus + success_bonus + time_penalty
-        return float(reward)
+    def _calculate_reward(self, distance_to_goal):
+        time_penalty = -0.1
+        distance_penalty = -10.0 * distance_to_goal
+        success_bonus = 50.0 if distance_to_goal < self.target_threshold else 0.0
+        return float(time_penalty + distance_penalty + success_bonus)
     
     def render(self, mode='human'):
         pass

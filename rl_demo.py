@@ -58,7 +58,7 @@ def sweep_axis(sim, robot_key, target_np, axis, speed, max_sweep_steps=600):
 
 
 def final_polish(sim, robot_key, target_np):
-    """Multi-pass axis sweep refinement."""
+    """Multi-pass axis sweep + diagonal refinement."""
     TOLERANCE = 0.00001
     speeds = [0.003, 0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002]
 
@@ -113,14 +113,14 @@ def final_polish(sim, robot_key, target_np):
 
 def move_to_target(sim, model, robot_key, target_np, ws_low, ws_high, max_steps=5000):
     """
-    RL agent with MATCHING velocity scaling to training environment.
+    RL agent drives toward target using ORIGINAL model's velocity scaling.
     
-    Training used: velocity = action * 1.5, num_steps=1
-    So we MUST use the same here for the model to work correctly.
+    Original training: max_velocity=2.0, num_steps=5
+    Deployment:        action * 0.8, num_steps=1 (finer control)
+    
+    Fast stall detection → hand off to axis sweep polish.
     """
     TOLERANCE = 0.00001
-    # Must match training environment's max_velocity
-    MAX_VELOCITY = 1.5
 
     state = sim.run([[0, 0, 0, 0]])
     pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
@@ -142,24 +142,23 @@ def move_to_target(sim, model, robot_key, target_np, ws_low, ws_high, max_steps=
             print(f"    RL SUCCESS: {dist * 1000:.4f}mm at step {step}")
             return dist
 
-        # Build observation exactly like training
+        # Observation: normalized positions (matches training)
         obs = np.concatenate([
             normalize_position(pos, ws_low, ws_high),
             normalize_position(target_np, ws_low, ws_high)
         ], dtype=np.float32)
         action, _ = model.predict(obs, deterministic=True)
 
-        # MATCH TRAINING: velocity = action * max_velocity
-        velocity = action * MAX_VELOCITY
+        # Velocity scaling matching original model's deployment
+        velocity = action * 0.8
 
-        # Send to sim with num_steps=1 (matches training)
         state = sim.run(
             [[float(velocity[0]), float(velocity[1]), float(velocity[2]), 0.0]],
             num_steps=1
         )
         pos = np.array(state[robot_key]["pipette_position"], dtype=np.float32)
 
-        # Stall detection
+        # Fast stall detection — don't waste steps
         if no_improve_count >= 300:
             print(f"    RL stalled at {best_dist * 1000:.4f}mm (step {step}) — handing off")
             break
@@ -206,6 +205,7 @@ def retract_pipette(sim, robot_key, retract_height=0.22):
 
 def main():
     parser = argparse.ArgumentParser()
+    # Use the ORIGINAL working model
     parser.add_argument("--model", type=str, default="lr3e-4_b128_s4096.zip")
     args = parser.parse_args()
 

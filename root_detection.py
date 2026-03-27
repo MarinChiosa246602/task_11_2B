@@ -21,17 +21,27 @@ def _extract_plate_roi(gray):
     return plate_mask, (px, py, pw, ph)
 
 
-def _trace_root_down(column_binary, min_gap=15):
+def _trace_root_down(column_binary, min_gap=10, min_pixel_ratio=0.05):
     """
     Trace a root downward through a binary column image.
-    Stop at the first significant vertical gap.
-    Returns (tip_row, tip_col) or None.
+    
+    A row counts as "root present" only if at least min_pixel_ratio
+    of the column width has active pixels. This prevents single noise
+    pixels from bridging gaps.
+    
+    Stop at the first gap of min_gap consecutive rows without enough
+    root pixels.
     """
     h, w = column_binary.shape
     if h == 0 or w == 0:
         return None
 
-    row_has_root = np.sum(column_binary, axis=1) > 0
+    min_pixels = max(1, int(w * min_pixel_ratio))
+    
+    # Count active pixels per row
+    row_counts = np.sum(column_binary > 0, axis=1)
+    row_has_root = row_counts >= min_pixels
+
     active_rows = np.where(row_has_root)[0]
     if len(active_rows) == 0:
         return None
@@ -48,6 +58,7 @@ def _trace_root_down(column_binary, min_gap=15):
             if gap_count >= min_gap:
                 break
 
+    # Find center x at the tip row
     tip_row_pixels = column_binary[tip_row, :]
     active_cols = np.where(tip_row_pixels > 0)[0]
     if len(active_cols) > 0:
@@ -60,13 +71,14 @@ def _trace_root_down(column_binary, min_gap=15):
 
 def detect_roots(image_path, debug=True):
     """
-    Robust root tip detection:
-      1. Find plate ROI.
-      2. Find seeds in top 30% (wider zone to catch seeds near edges).
-      3. For each seed, trace downward with gap-awareness.
-      4. The tip = last root pixel before a 15+ row gap.
-      
-    Uses multiple threshold methods and picks the best result.
+    Seed-first root detection with strict gap-aware tracing.
+    
+    1. Find plate ROI.
+    2. Find seeds in top 30%.
+    3. For each seed, trace downward in a narrow column.
+       - Only count rows with enough active pixels (not noise).
+       - Stop at first 10-row gap.
+    4. Root zone limited to top 45% of plate.
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -79,8 +91,7 @@ def detect_roots(image_path, debug=True):
     # ---- Step 1: Plate ROI ----
     plate_mask, (px, py, pw, ph) = _extract_plate_roi(gray)
 
-    # ---- Step 2: Find seeds ----
-    # Use top 30% of plate — seeds can be near the upper edge
+    # ---- Step 2: Find seeds in top 30% ----
     seed_zone_top = py
     seed_zone_bottom = py + int(ph * 0.30)
 
@@ -90,12 +101,10 @@ def detect_roots(image_path, debug=True):
 
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Try two threshold methods for seed detection and combine
     seed_thresh1 = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, 25, 10
     )
-    # Also try a global threshold for very dark seeds
     _, seed_thresh2 = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
     seed_combined = cv2.bitwise_or(seed_thresh1, seed_thresh2)
     seed_combined = cv2.bitwise_and(seed_combined, seed_mask)
@@ -114,14 +123,13 @@ def detect_roots(image_path, debug=True):
             continue
         center_x = bx + bw / 2.0
         center_y = by + bh / 2.0
-        # Seed must be in central 90% of plate width
         if center_x < px + 0.05 * pw or center_x > px + 0.95 * pw:
             continue
         seeds.append((center_x, center_y, area, cnt))
 
     seeds = sorted(seeds, key=lambda s: s[0])
 
-    # Merge nearby seeds (same plant)
+    # Merge nearby seeds
     merged_seeds = []
     for s in seeds:
         if merged_seeds and abs(s[0] - merged_seeds[-1][0]) < 0.04 * w:
@@ -135,9 +143,9 @@ def detect_roots(image_path, debug=True):
         merged_seeds = sorted(merged_seeds, key=lambda s: s[0])
 
     # ---- Step 3: Root threshold for tracing ----
-    root_zone_bottom = py + int(ph * 0.55)
+    # TIGHTER: roots stay in top 45% of plate
+    root_zone_bottom = py + int(ph * 0.45)
 
-    # Use adaptive threshold for roots
     root_thresh = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, 31, 12
@@ -147,17 +155,17 @@ def detect_roots(image_path, debug=True):
     zone_mask = cv2.bitwise_and(zone_mask, plate_mask)
     root_thresh = cv2.bitwise_and(root_thresh, zone_mask)
 
-    # Remove small noise
-    k_small = np.ones((2, 2), np.uint8)
+    # Remove small noise dots
+    k_small = np.ones((3, 3), np.uint8)
     root_thresh = cv2.morphologyEx(root_thresh, cv2.MORPH_OPEN, k_small, iterations=1)
-    # Vertical connection for thin roots
-    k_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
+    # Gentle vertical connection for thin roots
+    k_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
     root_thresh = cv2.dilate(root_thresh, k_vert, iterations=1)
 
-    # ---- Step 4: Trace each root ----
+    # ---- Step 4: Trace each root from its seed ----
     root_tips = []
-    column_half_width = int(pw * 0.05)
-    gap_threshold = max(12, int(ph * 0.012))
+    column_half_width = int(pw * 0.04)  # Narrower: ±4% of plate width
+    gap_threshold = max(8, int(ph * 0.01))  # Smaller gap = stricter cutoff
 
     for (seed_cx, seed_cy, seed_area, seed_cnt) in merged_seeds:
         col_left = max(px, int(seed_cx - column_half_width))
@@ -171,7 +179,7 @@ def detect_roots(image_path, debug=True):
             root_tips.append((seed_cx / w, (seed_cy + 15) / h))
             continue
 
-        result = _trace_root_down(column, min_gap=gap_threshold)
+        result = _trace_root_down(column, min_gap=gap_threshold, min_pixel_ratio=0.08)
 
         if result is None:
             root_tips.append((seed_cx / w, (seed_cy + 15) / h))
@@ -181,8 +189,8 @@ def detect_roots(image_path, debug=True):
         tip_y_abs = search_top + tip_row
         tip_x_abs = col_left + tip_col
 
-        # Sanity: tip must be below seed
-        if tip_y_abs <= seed_cy + 5:
+        # Sanity: tip must be meaningfully below the seed
+        if tip_y_abs <= seed_cy + 10:
             root_tips.append((seed_cx / w, (seed_cy + 20) / h))
             continue
 
@@ -192,7 +200,7 @@ def detect_roots(image_path, debug=True):
 
     # ---- Fallback ----
     standard_x = [0.18, 0.35, 0.50, 0.65, 0.82]
-    default_tip_y = (py + int(ph * 0.25)) / float(h)
+    default_tip_y = (py + int(ph * 0.22)) / float(h)
     while len(root_tips) < 5:
         existing_x = [r[0] for r in root_tips]
         filled = False
@@ -209,6 +217,8 @@ def detect_roots(image_path, debug=True):
         debug_img = img.copy()
         cv2.rectangle(debug_img, (px, seed_zone_top), (px + pw, seed_zone_bottom), (255, 255, 0), 2)
         cv2.line(debug_img, (px, root_zone_bottom), (px + pw, root_zone_bottom), (0, 255, 255), 2)
+        cv2.putText(debug_img, "Root Limit (45%)", (px + 5, root_zone_bottom - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         for (scx, scy, sa, scnt) in merged_seeds:
             cv2.circle(debug_img, (int(scx), int(scy)), 6, (255, 0, 0), -1)
             cl = max(px, int(scx - column_half_width))
@@ -230,35 +240,19 @@ def detect_roots(image_path, debug=True):
 
 
 def roots_to_world_coords(root_positions, sim, drop_height=0.095):
-    """
-    Maps 2D image detections to 3D world space.
-    
-    Coordinate mapping:
-      Image Y (top=0, bottom=1) → World X (inverted)
-      Image X (left=0, right=1) → World Y
-    
-    The plate physical size is ~0.15m (150mm).
-    Offsets are calibrated to center drops on roots.
-    """
+    """Maps 2D image detections to 3D world space."""
     world_targets = []
     spec_pos, _ = p.getBasePositionAndOrientation(sim.specimenIds[0])
     plate_x, plate_y, plate_z = spec_pos
 
-    # Plate dimension in world units
     plate_size = 0.15
-
-    # Calibration offsets — fine-tuned to center drops on roots
     x_offset = 0.004
     y_offset = -0.008
 
     for nx, ny in root_positions:
-        # Image Y -> World X (inverted: top of image = far X)
         world_x = plate_x + (ny - 0.5) * plate_size + x_offset
-        # Image X -> World Y
         world_y = plate_y + (nx - 0.5) * plate_size + y_offset
-        # Height above plate
         world_z = plate_z + drop_height
-
         world_targets.append([world_x, world_y, world_z])
 
     return world_targets
