@@ -21,31 +21,40 @@ def _extract_plate_roi(gray):
     return plate_mask, (px, py, pw, ph)
 
 
-def _trace_root_down(column_binary, min_gap=10, min_pixel_ratio=0.05):
+def _trace_by_smoothed_intensity(column_gray, min_gap=20, dark_threshold=12, smooth_window=15):
     """
-    Trace a root downward through a binary column image.
+    Trace a root using SMOOTHED intensity contrast.
     
-    A row counts as "root present" only if at least min_pixel_ratio
-    of the column width has active pixels. This prevents single noise
-    pixels from bridging gaps.
+    1. For each row, compute contrast = median - min pixel.
+    2. Smooth the contrast with a rolling window.
+    3. A row has root if smoothed contrast > threshold.
+    4. Stop at first gap of min_gap rows where smoothed contrast is low.
     
-    Stop at the first gap of min_gap consecutive rows without enough
-    root pixels.
+    Smoothing is critical: it averages out isolated noisy pixels that
+    would bridge gaps in raw contrast, while preserving the continuous
+    signal from actual roots.
     """
-    h, w = column_binary.shape
+    h, w = column_gray.shape
     if h == 0 or w == 0:
         return None
 
-    min_pixels = max(1, int(w * min_pixel_ratio))
-    
-    # Count active pixels per row
-    row_counts = np.sum(column_binary > 0, axis=1)
-    row_has_root = row_counts >= min_pixels
+    # Per-row contrast: how much darker is the darkest pixel vs background
+    row_min = np.min(column_gray, axis=1).astype(float)
+    row_median = np.median(column_gray, axis=1).astype(float)
+    contrast = row_median - row_min
+
+    # Smooth the contrast profile — kills isolated noise spikes
+    kernel = np.ones(smooth_window) / smooth_window
+    smooth_contrast = np.convolve(contrast, kernel, mode='same')
+
+    # Root present if smoothed contrast exceeds threshold
+    row_has_root = smooth_contrast > dark_threshold
 
     active_rows = np.where(row_has_root)[0]
     if len(active_rows) == 0:
         return None
 
+    # Trace with gap detection on smoothed signal
     tip_row = active_rows[0]
     gap_count = 0
 
@@ -58,27 +67,21 @@ def _trace_root_down(column_binary, min_gap=10, min_pixel_ratio=0.05):
             if gap_count >= min_gap:
                 break
 
-    # Find center x at the tip row
-    tip_row_pixels = column_binary[tip_row, :]
-    active_cols = np.where(tip_row_pixels > 0)[0]
-    if len(active_cols) > 0:
-        tip_col = (active_cols[0] + active_cols[-1]) / 2.0
-    else:
-        tip_col = w / 2.0
+    # Find darkest pixel x at tip row
+    tip_row_data = column_gray[tip_row, :]
+    tip_col = float(np.argmin(tip_row_data))
 
     return (tip_row, tip_col)
 
 
 def detect_roots(image_path, debug=True):
     """
-    Seed-first root detection with strict gap-aware tracing.
+    Seed-first detection with smoothed intensity profiling.
     
-    1. Find plate ROI.
-    2. Find seeds in top 30%.
-    3. For each seed, trace downward in a narrow column.
-       - Only count rows with enough active pixels (not noise).
-       - Stop at first 10-row gap.
-    4. Root zone limited to top 45% of plate.
+    The smoothed contrast naturally separates:
+    - Root signal (sustained dark line → high smoothed contrast)
+    - Noise (isolated dark pixels → averaged away by smoothing)
+    - Water droplets below roots (appear after a gap)
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -129,7 +132,6 @@ def detect_roots(image_path, debug=True):
 
     seeds = sorted(seeds, key=lambda s: s[0])
 
-    # Merge nearby seeds
     merged_seeds = []
     for s in seeds:
         if merged_seeds and abs(s[0] - merged_seeds[-1][0]) < 0.04 * w:
@@ -142,30 +144,13 @@ def detect_roots(image_path, debug=True):
         merged_seeds = sorted(merged_seeds, key=lambda s: s[2], reverse=True)[:5]
         merged_seeds = sorted(merged_seeds, key=lambda s: s[0])
 
-    # ---- Step 3: Root threshold for tracing ----
-    # TIGHTER: roots stay in top 45% of plate
-    root_zone_bottom = py + int(ph * 0.45)
-
-    root_thresh = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 31, 12
-    )
-    zone_mask = np.zeros_like(gray)
-    zone_mask[py:root_zone_bottom, px:px + pw] = 255
-    zone_mask = cv2.bitwise_and(zone_mask, plate_mask)
-    root_thresh = cv2.bitwise_and(root_thresh, zone_mask)
-
-    # Remove small noise dots
-    k_small = np.ones((3, 3), np.uint8)
-    root_thresh = cv2.morphologyEx(root_thresh, cv2.MORPH_OPEN, k_small, iterations=1)
-    # Gentle vertical connection for thin roots
-    k_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
-    root_thresh = cv2.dilate(root_thresh, k_vert, iterations=1)
-
-    # ---- Step 4: Trace each root from its seed ----
+    # ---- Step 3: Trace each root ----
+    root_zone_bottom = py + int(ph * 0.55)
     root_tips = []
-    column_half_width = int(pw * 0.04)  # Narrower: ±4% of plate width
-    gap_threshold = max(8, int(ph * 0.01))  # Smaller gap = stricter cutoff
+    column_half_width = int(pw * 0.04)
+    gap_threshold = max(20, int(ph * 0.02))
+
+    gray_smooth = cv2.GaussianBlur(gray, (3, 3), 0)
 
     for (seed_cx, seed_cy, seed_area, seed_cnt) in merged_seeds:
         col_left = max(px, int(seed_cx - column_half_width))
@@ -173,13 +158,26 @@ def detect_roots(image_path, debug=True):
         search_top = int(seed_cy)
         search_bottom = root_zone_bottom
 
-        column = root_thresh[search_top:search_bottom, col_left:col_right]
+        column = gray_smooth[search_top:search_bottom, col_left:col_right]
 
         if column.size == 0:
             root_tips.append((seed_cx / w, (seed_cy + 15) / h))
             continue
 
-        result = _trace_root_down(column, min_gap=gap_threshold, min_pixel_ratio=0.08)
+        # Smoothed intensity tracing
+        result = _trace_by_smoothed_intensity(
+            column,
+            min_gap=gap_threshold,
+            dark_threshold=12,
+            smooth_window=15
+        )
+
+        if result is None:
+            # Fallback: try more sensitive
+            result = _trace_by_smoothed_intensity(
+                column, min_gap=gap_threshold,
+                dark_threshold=8, smooth_window=20
+            )
 
         if result is None:
             root_tips.append((seed_cx / w, (seed_cy + 15) / h))
@@ -189,18 +187,13 @@ def detect_roots(image_path, debug=True):
         tip_y_abs = search_top + tip_row
         tip_x_abs = col_left + tip_col
 
-        # Sanity: tip must be meaningfully below the seed
-        if tip_y_abs <= seed_cy + 10:
-            root_tips.append((seed_cx / w, (seed_cy + 20) / h))
-            continue
-
         root_tips.append((tip_x_abs / w, tip_y_abs / h))
 
     root_tips = sorted(root_tips, key=lambda r: r[0])
 
     # ---- Fallback ----
     standard_x = [0.18, 0.35, 0.50, 0.65, 0.82]
-    default_tip_y = (py + int(ph * 0.22)) / float(h)
+    default_tip_y = (py + int(ph * 0.35)) / float(h)
     while len(root_tips) < 5:
         existing_x = [r[0] for r in root_tips]
         filled = False
@@ -217,8 +210,6 @@ def detect_roots(image_path, debug=True):
         debug_img = img.copy()
         cv2.rectangle(debug_img, (px, seed_zone_top), (px + pw, seed_zone_bottom), (255, 255, 0), 2)
         cv2.line(debug_img, (px, root_zone_bottom), (px + pw, root_zone_bottom), (0, 255, 255), 2)
-        cv2.putText(debug_img, "Root Limit (45%)", (px + 5, root_zone_bottom - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         for (scx, scy, sa, scnt) in merged_seeds:
             cv2.circle(debug_img, (int(scx), int(scy)), 6, (255, 0, 0), -1)
             cl = max(px, int(scx - column_half_width))
